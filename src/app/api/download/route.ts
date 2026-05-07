@@ -1,10 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "node:child_process";
+import { isAbsolute, normalize } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const YT_DLP_BIN = process.env.YT_DLP_BIN || "yt-dlp";
+const MAX_PLAYLIST_ITEMS = 10;
+const MAX_BUFFER_SIZE = 1024 * 1024 * 50;
 const YT_DLP_FORMAT = "b[height<=720]/best[height<=720]/b/best";
+
+function resolveYtDlpBinary(): string {
+  const configuredBinary = process.env.YT_DLP_BIN?.trim();
+  if (!configuredBinary) {
+    return "yt-dlp";
+  }
+
+  const safeCommandPattern = /^[A-Za-z0-9._-]+$/;
+  if (safeCommandPattern.test(configuredBinary) && !configuredBinary.startsWith("-")) {
+    return configuredBinary;
+  }
+
+  const safePathPattern = /^[A-Za-z0-9._/-]+$/;
+  const normalizedPath = normalize(configuredBinary);
+  const isSafePath =
+    safePathPattern.test(configuredBinary) &&
+    isAbsolute(configuredBinary) &&
+    !configuredBinary.includes("..") &&
+    normalizedPath === configuredBinary;
+
+  return isSafePath ? configuredBinary : "yt-dlp";
+}
+
+const YT_DLP_BIN = resolveYtDlpBinary();
 
 function isPickerItem(item: unknown): item is {
   url: string;
@@ -35,6 +61,17 @@ type YtDlpMetadata = {
   entries?: YtDlpEntry[];
 };
 
+function isYtDlpEntry(value: unknown): value is YtDlpEntry {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.url === undefined || typeof candidate.url === "string") &&
+    (candidate.webpage_url === undefined || typeof candidate.webpage_url === "string") &&
+    (candidate.thumbnail === undefined || typeof candidate.thumbnail === "string")
+  );
+}
+
 function sanitizeFilename(name: string): string {
   return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
 }
@@ -63,7 +100,7 @@ function getErrorMessage(error: unknown): string {
 
 async function runYtDlp(args: string[]): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(YT_DLP_BIN, args, { maxBuffer: 1024 * 1024 * 10 });
+    const { stdout } = await execFileAsync(YT_DLP_BIN, args, { maxBuffer: MAX_BUFFER_SIZE });
     return stdout.trim();
   } catch (error) {
     throw new Error(getErrorMessage(error));
@@ -75,15 +112,32 @@ async function fetchMetadata(url: string): Promise<YtDlpMetadata> {
     "--no-warnings",
     "--skip-download",
     "--dump-single-json",
-    "--no-playlist",
+    "--",
     url,
   ]);
 
+  let parsed: unknown;
   try {
-    return JSON.parse(output) as YtDlpMetadata;
+    parsed = JSON.parse(output);
   } catch {
     throw new Error("Unable to parse downloader metadata.");
   }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Downloader metadata has an unexpected format.");
+  }
+
+  const metadata = parsed as Record<string, unknown>;
+  const entries =
+    Array.isArray(metadata.entries) && metadata.entries.every(isYtDlpEntry)
+      ? metadata.entries
+      : undefined;
+
+  return {
+    title: typeof metadata.title === "string" ? metadata.title : undefined,
+    ext: typeof metadata.ext === "string" ? metadata.ext : undefined,
+    entries,
+  };
 }
 
 async function fetchDirectUrl(url: string): Promise<string> {
@@ -93,6 +147,7 @@ async function fetchDirectUrl(url: string): Promise<string> {
     "-f",
     YT_DLP_FORMAT,
     "-g",
+    "--",
     url,
   ]);
 
@@ -113,33 +168,44 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate URL format
+    let parsedUrl: URL;
     try {
-      new URL(url);
+      parsedUrl = new URL(url);
     } catch {
       return NextResponse.json({ error: "Invalid URL format" }, { status: 400 });
+    }
+
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      return NextResponse.json({ error: "Only HTTP(S) video URLs are supported" }, { status: 400 });
     }
 
     const metadata = await fetchMetadata(url);
 
     if (Array.isArray(metadata.entries) && metadata.entries.length > 1) {
-      const limitedEntries = metadata.entries.slice(0, 10);
-      const resolvedItems = await Promise.all(
-        limitedEntries.map(async (entry) => {
-          const entryUrl = entry.webpage_url || entry.url;
-          if (!entryUrl) return null;
+      const limitedEntries = metadata.entries.slice(0, MAX_PLAYLIST_ITEMS);
+      const resolvedItems: Array<{ url: string; thumb?: string; type: "video" } | null> = [];
 
-          try {
-            const directUrl = await fetchDirectUrl(entryUrl);
-            return {
-              url: directUrl,
-              thumb: entry.thumbnail,
-              type: "video",
-            };
-          } catch {
-            return null;
-          }
-        })
-      );
+      for (const [entryIndex, entry] of limitedEntries.entries()) {
+        const entryUrl = entry.webpage_url || entry.url;
+        if (!entryUrl) {
+          resolvedItems.push(null);
+          continue;
+        }
+
+        try {
+          const directUrl = await fetchDirectUrl(entryUrl);
+          resolvedItems.push({
+            url: directUrl,
+            thumb: entry.thumbnail,
+            type: "video",
+          });
+        } catch (entryError) {
+          console.warn(
+            `Skipping playlist item ${entryIndex + 1} after extraction failure: ${getErrorMessage(entryError)}`
+          );
+          resolvedItems.push(null);
+        }
+      }
 
       const items = resolvedItems.filter(isPickerItem);
       if (items.length > 0) {
@@ -166,7 +232,7 @@ export async function POST(request: NextRequest) {
     console.error("Download error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Server error. Please try again." },
-      { status: 502 }
+      { status: 500 }
     );
   }
 }

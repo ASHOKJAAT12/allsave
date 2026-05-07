@@ -13,6 +13,10 @@ This project now uses [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) for video URL
      ```bash
      python3 -m pip install -U yt-dlp
      ```
+   - Windows (PowerShell with Python):
+     ```powershell
+     py -m pip install -U yt-dlp
+     ```
    - Or download a standalone binary from the official `yt-dlp` release page.
 3. (Optional) Set a custom binary path:
    ```bash
