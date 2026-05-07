@@ -7,11 +7,17 @@ const execFileAsync = promisify(execFile);
 const MAX_PLAYLIST_ITEMS = 10;
 const MAX_BUFFER_SIZE = 1024 * 1024 * 50;
 const YT_DLP_FORMAT = "b[height<=720]/best[height<=720]/b/best";
+const YT_DLP_ERROR_CACHE_DURATION_MS = 60_000;
 
-function resolveYtDlpBinary(): string {
+type YtDlpCommand = {
+  binary: string;
+  prefixArgs: string[];
+};
+
+function resolveConfiguredYtDlpBinary(): string | null {
   const configuredBinary = process.env.YT_DLP_BIN?.trim();
   if (!configuredBinary) {
-    return "yt-dlp";
+    return null;
   }
 
   const safeCommandPattern = /^[A-Za-z0-9._-]+$/;
@@ -27,10 +33,95 @@ function resolveYtDlpBinary(): string {
     !configuredBinary.includes("..") &&
     normalizedPath === configuredBinary;
 
-  return isSafePath ? configuredBinary : "yt-dlp";
+  return isSafePath ? configuredBinary : null;
 }
 
-const YT_DLP_BIN = resolveYtDlpBinary();
+function getYtDlpCandidates(): YtDlpCommand[] {
+  const configuredBinary = resolveConfiguredYtDlpBinary();
+  const candidates: YtDlpCommand[] = [
+    { binary: "yt-dlp", prefixArgs: [] },
+    { binary: "python3", prefixArgs: ["-m", "yt_dlp"] },
+    { binary: "python", prefixArgs: ["-m", "yt_dlp"] },
+    { binary: "py", prefixArgs: ["-m", "yt_dlp"] },
+  ];
+
+  if (configuredBinary) {
+    candidates.unshift({ binary: configuredBinary, prefixArgs: [] });
+  }
+
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = `${candidate.binary} ${candidate.prefixArgs.join(" ")}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+let cachedYtDlpCommand: YtDlpCommand | null = null;
+let cachedYtDlpResolutionError: Error | null = null;
+let cachedYtDlpResolutionErrorAt = 0;
+let ytDlpResolutionPromise: Promise<YtDlpCommand> | null = null;
+
+function formatYtDlpCommand(command: YtDlpCommand): string {
+  return [command.binary, ...command.prefixArgs].join(" ");
+}
+
+async function resolveYtDlpCommand(): Promise<YtDlpCommand> {
+  if (cachedYtDlpCommand) {
+    return cachedYtDlpCommand;
+  }
+
+  const now = Date.now();
+  const hasRecentResolutionError =
+    cachedYtDlpResolutionError &&
+    now - cachedYtDlpResolutionErrorAt < YT_DLP_ERROR_CACHE_DURATION_MS;
+  if (hasRecentResolutionError && cachedYtDlpResolutionError) {
+    throw cachedYtDlpResolutionError;
+  }
+
+  if (ytDlpResolutionPromise) {
+    return ytDlpResolutionPromise;
+  }
+
+  const candidates = getYtDlpCandidates();
+  ytDlpResolutionPromise = (async () => {
+    for (const candidate of candidates) {
+      try {
+        await execFileAsync(candidate.binary, [...candidate.prefixArgs, "--version"], {
+          maxBuffer: MAX_BUFFER_SIZE,
+        });
+        cachedYtDlpCommand = candidate;
+        cachedYtDlpResolutionError = null;
+        cachedYtDlpResolutionErrorAt = 0;
+        return candidate;
+      } catch (candidateError) {
+        if (process.env.NODE_ENV !== "production") {
+          console.warn(
+            `Skipping unavailable downloader candidate "${formatYtDlpCommand(candidate)}": ${getErrorMessage(candidateError)}`
+          );
+        }
+        continue;
+      }
+    }
+
+    const attemptedCommands = candidates.map(formatYtDlpCommand).join(", ");
+    const resolutionError = new Error(
+      `Video downloader is not configured on the server. Install yt-dlp (or Python module yt_dlp) and optionally set YT_DLP_BIN. Tried: ${attemptedCommands}`
+    );
+    cachedYtDlpResolutionError = resolutionError;
+    cachedYtDlpResolutionErrorAt = Date.now();
+    throw resolutionError;
+  })();
+
+  try {
+    return await ytDlpResolutionPromise;
+  } finally {
+    ytDlpResolutionPromise = null;
+  }
+}
 
 function isPickerItem(item: unknown): item is {
   url: string;
@@ -88,10 +179,12 @@ function getErrorMessage(error: unknown): string {
     stderr?: string;
     message?: string;
     shortMessage?: string;
+    path?: string;
   };
 
   if (err.code === "ENOENT") {
-    return "Video downloader is not configured on the server (yt-dlp not found).";
+    const missingBinary = err.path ? ` (${err.path} not found)` : "";
+    return `Video downloader is not configured on the server${missingBinary}. Install yt-dlp (or Python module yt_dlp) and optionally set YT_DLP_BIN.`;
   }
 
   const details = err.stderr?.trim() || err.shortMessage?.trim() || err.message?.trim();
@@ -100,7 +193,10 @@ function getErrorMessage(error: unknown): string {
 
 async function runYtDlp(args: string[]): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(YT_DLP_BIN, args, { maxBuffer: MAX_BUFFER_SIZE });
+    const command = await resolveYtDlpCommand();
+    const { stdout } = await execFileAsync(command.binary, [...command.prefixArgs, ...args], {
+      maxBuffer: MAX_BUFFER_SIZE,
+    });
     return stdout.trim();
   } catch (error) {
     throw new Error(getErrorMessage(error));
