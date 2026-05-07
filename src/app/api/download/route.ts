@@ -12,6 +12,7 @@ type YtDlpCommand = {
   binary: string;
   prefixArgs: string[];
 };
+const YT_DLP_RESOLUTION_RETRY_MS = 60_000;
 
 function resolveConfiguredYtDlpBinary(): string | null {
   const configuredBinary = process.env.YT_DLP_BIN?.trim();
@@ -60,28 +61,60 @@ function getYtDlpCandidates(): YtDlpCommand[] {
 }
 
 let cachedYtDlpCommand: YtDlpCommand | null = null;
+let cachedYtDlpResolutionError: Error | null = null;
+let cachedYtDlpResolutionErrorAt = 0;
+let ytDlpResolutionPromise: Promise<YtDlpCommand> | null = null;
+
+function formatYtDlpCommand(command: YtDlpCommand): string {
+  return [command.binary, ...command.prefixArgs].join(" ");
+}
 
 async function resolveYtDlpCommand(): Promise<YtDlpCommand> {
   if (cachedYtDlpCommand) {
     return cachedYtDlpCommand;
   }
 
-  const candidates = getYtDlpCandidates();
-  for (const candidate of candidates) {
-    try {
-      await execFileAsync(candidate.binary, [...candidate.prefixArgs, "--version"], {
-        maxBuffer: MAX_BUFFER_SIZE,
-      });
-      cachedYtDlpCommand = candidate;
-      return candidate;
-    } catch {
-      continue;
-    }
+  const now = Date.now();
+  const hasRecentResolutionError =
+    cachedYtDlpResolutionError && now - cachedYtDlpResolutionErrorAt < YT_DLP_RESOLUTION_RETRY_MS;
+  if (hasRecentResolutionError && cachedYtDlpResolutionError) {
+    throw cachedYtDlpResolutionError;
   }
 
-  throw new Error(
-    "Video downloader is not configured on the server. Install yt-dlp (or Python module yt_dlp) and optionally set YT_DLP_BIN."
-  );
+  if (ytDlpResolutionPromise) {
+    return ytDlpResolutionPromise;
+  }
+
+  const candidates = getYtDlpCandidates();
+  ytDlpResolutionPromise = (async () => {
+    for (const candidate of candidates) {
+      try {
+        await execFileAsync(candidate.binary, [...candidate.prefixArgs, "--version"], {
+          maxBuffer: MAX_BUFFER_SIZE,
+        });
+        cachedYtDlpCommand = candidate;
+        cachedYtDlpResolutionError = null;
+        cachedYtDlpResolutionErrorAt = 0;
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+
+    const attemptedCommands = candidates.map(formatYtDlpCommand).join(", ");
+    const resolutionError = new Error(
+      `Video downloader is not configured on the server. Install yt-dlp (or Python module yt_dlp) and optionally set YT_DLP_BIN. Tried: ${attemptedCommands}`
+    );
+    cachedYtDlpResolutionError = resolutionError;
+    cachedYtDlpResolutionErrorAt = Date.now();
+    throw resolutionError;
+  })();
+
+  try {
+    return await ytDlpResolutionPromise;
+  } finally {
+    ytDlpResolutionPromise = null;
+  }
 }
 
 function isPickerItem(item: unknown): item is {
