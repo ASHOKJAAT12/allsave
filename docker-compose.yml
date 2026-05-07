@@ -1,23 +1,8 @@
 version: "3.8"
 services:
-  cobalt-api:
-    image: ghcr.io/imputnet/cobalt:latest
-    container_name: cobalt-api
-    restart: unless-stopped
-    ports:
-      - "9000:9000"
-    environment:
-      - API_PORT=9000
-      - API_URL=http://localhost:9000
-      - DURATION_LIMIT=10800
-      - CORS_WILDCARD=1
   nextjs-app:
     build: .
     container_name: video-saver-app
     restart: unless-stopped
     ports:
       - "3000:3000"
-    environment:
-      - COBALT_API_URL=http://cobalt-api:9000
-    depends_on:
-      - cobalt-api
