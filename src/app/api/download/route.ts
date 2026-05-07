@@ -7,12 +7,12 @@ const execFileAsync = promisify(execFile);
 const MAX_PLAYLIST_ITEMS = 10;
 const MAX_BUFFER_SIZE = 1024 * 1024 * 50;
 const YT_DLP_FORMAT = "b[height<=720]/best[height<=720]/b/best";
+const YT_DLP_ERROR_CACHE_DURATION_MS = 60_000;
 
 type YtDlpCommand = {
   binary: string;
   prefixArgs: string[];
 };
-const YT_DLP_RESOLUTION_RETRY_MS = 60_000;
 
 function resolveConfiguredYtDlpBinary(): string | null {
   const configuredBinary = process.env.YT_DLP_BIN?.trim();
@@ -76,7 +76,8 @@ async function resolveYtDlpCommand(): Promise<YtDlpCommand> {
 
   const now = Date.now();
   const hasRecentResolutionError =
-    cachedYtDlpResolutionError && now - cachedYtDlpResolutionErrorAt < YT_DLP_RESOLUTION_RETRY_MS;
+    cachedYtDlpResolutionError &&
+    now - cachedYtDlpResolutionErrorAt < YT_DLP_ERROR_CACHE_DURATION_MS;
   if (hasRecentResolutionError && cachedYtDlpResolutionError) {
     throw cachedYtDlpResolutionError;
   }
@@ -96,7 +97,12 @@ async function resolveYtDlpCommand(): Promise<YtDlpCommand> {
         cachedYtDlpResolutionError = null;
         cachedYtDlpResolutionErrorAt = 0;
         return candidate;
-      } catch {
+      } catch (candidateError) {
+        if (process.env.NODE_ENV !== "production") {
+          console.warn(
+            `Skipping unavailable downloader candidate "${formatYtDlpCommand(candidate)}": ${getErrorMessage(candidateError)}`
+          );
+        }
         continue;
       }
     }
