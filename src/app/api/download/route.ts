@@ -62,9 +62,12 @@ export async function POST(request: NextRequest) {
         success: true,
         multiple: true,
         items: pickerItems
-          .filter((item) => item.url)
+          .filter(
+            (item): item is { url: string; thumb?: string; type?: string } =>
+              typeof item.url === "string" && item.url.length > 0
+          )
           .map((item) => ({
-            url: item.url as string,
+            url: item.url,
             thumb: item.thumb,
             type: item.type,
           })),
