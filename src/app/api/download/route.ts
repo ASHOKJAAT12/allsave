@@ -54,14 +54,20 @@ export async function POST(request: NextRequest) {
 
     // Handle multiple items (picker - Instagram carousels, etc.)
     if (data.status === "picker") {
+      const pickerItems = Array.isArray(data.picker)
+        ? (data.picker as Array<{ url?: string; thumb?: string; type?: string }>)
+        : [];
+
       return NextResponse.json({
         success: true,
         multiple: true,
-        items: data.picker.map((item: any) => ({
-          url: item.url,
-          thumb: item.thumb,
-          type: item.type,
-        })),
+        items: pickerItems
+          .filter((item) => item.url)
+          .map((item) => ({
+            url: item.url as string,
+            thumb: item.thumb,
+            type: item.type,
+          })),
       });
     }
 
