@@ -20,7 +20,7 @@ export default function DownloadForm({ platform }: DownloadFormProps) {
       const text = await navigator.clipboard.readText();
       setUrl(text);
       setError("");
-    } catch (err) {
+    } catch {
       setError("Failed to read clipboard. Please paste manually.");
     }
   };
