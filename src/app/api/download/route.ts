@@ -1,6 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
+import { execFile } from "node:child_process";
+import { isAbsolute, normalize } from "node:path";
+import { promisify } from "node:util";
 
-const COBALT_API_URL = process.env.COBALT_API_URL || "http://localhost:9000";
+const execFileAsync = promisify(execFile);
+const MAX_PLAYLIST_ITEMS = 10;
+const MAX_BUFFER_SIZE = 1024 * 1024 * 50;
+const YT_DLP_FORMAT = "b[height<=720]/best[height<=720]/b/best";
+
+function resolveYtDlpBinary(): string {
+  const configuredBinary = process.env.YT_DLP_BIN?.trim();
+  if (!configuredBinary) {
+    return "yt-dlp";
+  }
+
+  const safeCommandPattern = /^[A-Za-z0-9._-]+$/;
+  if (safeCommandPattern.test(configuredBinary) && !configuredBinary.startsWith("-")) {
+    return configuredBinary;
+  }
+
+  const safePathPattern = /^[A-Za-z0-9._/-]+$/;
+  const normalizedPath = normalize(configuredBinary);
+  const isSafePath =
+    safePathPattern.test(configuredBinary) &&
+    isAbsolute(configuredBinary) &&
+    !configuredBinary.includes("..") &&
+    normalizedPath === configuredBinary;
+
+  return isSafePath ? configuredBinary : "yt-dlp";
+}
+
+const YT_DLP_BIN = resolveYtDlpBinary();
 
 function isPickerItem(item: unknown): item is {
   url: string;
@@ -19,6 +49,116 @@ function isPickerItem(item: unknown): item is {
   );
 }
 
+type YtDlpEntry = {
+  url?: string;
+  webpage_url?: string;
+  thumbnail?: string;
+};
+
+type YtDlpMetadata = {
+  title?: string;
+  ext?: string;
+  entries?: YtDlpEntry[];
+};
+
+function isYtDlpEntry(value: unknown): value is YtDlpEntry {
+  if (!value || typeof value !== "object") return false;
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    (candidate.url === undefined || typeof candidate.url === "string") &&
+    (candidate.webpage_url === undefined || typeof candidate.webpage_url === "string") &&
+    (candidate.thumbnail === undefined || typeof candidate.thumbnail === "string")
+  );
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim();
+}
+
+function getErrorMessage(error: unknown): string {
+  const defaultMessage = "Failed to process this URL with yt-dlp.";
+
+  if (!error || typeof error !== "object") {
+    return defaultMessage;
+  }
+
+  const err = error as {
+    code?: string;
+    stderr?: string;
+    message?: string;
+    shortMessage?: string;
+  };
+
+  if (err.code === "ENOENT") {
+    return "Video downloader is not configured on the server (yt-dlp not found).";
+  }
+
+  const details = err.stderr?.trim() || err.shortMessage?.trim() || err.message?.trim();
+  return details || defaultMessage;
+}
+
+async function runYtDlp(args: string[]): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync(YT_DLP_BIN, args, { maxBuffer: MAX_BUFFER_SIZE });
+    return stdout.trim();
+  } catch (error) {
+    throw new Error(getErrorMessage(error));
+  }
+}
+
+async function fetchMetadata(url: string): Promise<YtDlpMetadata> {
+  const output = await runYtDlp([
+    "--no-warnings",
+    "--skip-download",
+    "--dump-single-json",
+    "--",
+    url,
+  ]);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("Unable to parse downloader metadata.");
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Downloader metadata has an unexpected format.");
+  }
+
+  const metadata = parsed as Record<string, unknown>;
+  const entries =
+    Array.isArray(metadata.entries) && metadata.entries.every(isYtDlpEntry)
+      ? metadata.entries
+      : undefined;
+
+  return {
+    title: typeof metadata.title === "string" ? metadata.title : undefined,
+    ext: typeof metadata.ext === "string" ? metadata.ext : undefined,
+    entries,
+  };
+}
+
+async function fetchDirectUrl(url: string): Promise<string> {
+  const output = await runYtDlp([
+    "--no-warnings",
+    "--no-playlist",
+    "-f",
+    YT_DLP_FORMAT,
+    "-g",
+    "--",
+    url,
+  ]);
+
+  const directUrl = output.split(/\r?\n/).find((line) => line.trim().length > 0);
+  if (!directUrl) {
+    throw new Error("Unable to resolve a direct download URL.");
+  }
+
+  return directUrl;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { url } = await request.json();
@@ -28,68 +168,70 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate URL format
+    let parsedUrl: URL;
     try {
-      new URL(url);
+      parsedUrl = new URL(url);
     } catch {
       return NextResponse.json({ error: "Invalid URL format" }, { status: 400 });
     }
 
-    // Call Cobalt API
-    const cobaltResponse = await fetch(`${COBALT_API_URL}/api/json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        url: url,
-        vQuality: "720",
-        filenamePattern: "pretty",
-        isAudioOnly: false,
-        disableMetadata: false,
-      }),
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      return NextResponse.json({ error: "Only HTTP(S) video URLs are supported" }, { status: 400 });
+    }
+
+    const metadata = await fetchMetadata(url);
+
+    if (Array.isArray(metadata.entries) && metadata.entries.length > 1) {
+      const limitedEntries = metadata.entries.slice(0, MAX_PLAYLIST_ITEMS);
+      const resolvedItems: Array<{ url: string; thumb?: string; type: "video" } | null> = [];
+
+      for (const [entryIndex, entry] of limitedEntries.entries()) {
+        const entryUrl = entry.webpage_url || entry.url;
+        if (!entryUrl) {
+          resolvedItems.push(null);
+          continue;
+        }
+
+        try {
+          const directUrl = await fetchDirectUrl(entryUrl);
+          resolvedItems.push({
+            url: directUrl,
+            thumb: entry.thumbnail,
+            type: "video",
+          });
+        } catch (entryError) {
+          console.warn(
+            `Skipping playlist item ${entryIndex + 1} after extraction failure: ${getErrorMessage(entryError)}`
+          );
+          resolvedItems.push(null);
+        }
+      }
+
+      const items = resolvedItems.filter(isPickerItem);
+      if (items.length > 0) {
+        return NextResponse.json({
+          success: true,
+          multiple: true,
+          items,
+        });
+      }
+    }
+
+    const downloadUrl = await fetchDirectUrl(url);
+    const extension = metadata.ext || "mp4";
+    const filename = metadata.title
+      ? `${sanitizeFilename(metadata.title)}.${extension}`
+      : `video.${extension}`;
+
+    return NextResponse.json({
+      success: true,
+      downloadUrl,
+      filename,
     });
-
-    const data = await cobaltResponse.json();
-
-    // Handle error response
-    if (data.status === "error") {
-      return NextResponse.json(
-        { error: data.text || "Failed to process video" },
-        { status: 400 }
-      );
-    }
-
-    // Handle single video (redirect or stream)
-    if (data.status === "redirect" || data.status === "stream") {
-      return NextResponse.json({
-        success: true,
-        downloadUrl: data.url,
-        filename: data.filename || "video.mp4",
-      });
-    }
-
-    // Handle multiple items (picker - Instagram carousels, etc.)
-    if (data.status === "picker") {
-      const pickerItems: unknown[] = Array.isArray(data.picker) ? data.picker : [];
-
-      return NextResponse.json({
-        success: true,
-        multiple: true,
-        items: pickerItems.filter(isPickerItem)
-          .map((item) => ({
-            url: item.url,
-            thumb: item.thumb,
-            type: item.type,
-          })),
-      });
-    }
-
-    return NextResponse.json({ error: "Unexpected response" }, { status: 500 });
   } catch (error) {
     console.error("Download error:", error);
     return NextResponse.json(
-      { error: "Server error. Please try again." },
+      { error: error instanceof Error ? error.message : "Server error. Please try again." },
       { status: 500 }
     );
   }
