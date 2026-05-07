@@ -2,6 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 
 const COBALT_API_URL = process.env.COBALT_API_URL || "http://localhost:9000";
 
+function isPickerItem(item: unknown): item is {
+  url: string;
+  thumb?: string;
+  type?: string;
+} {
+  if (typeof item !== "object" || item === null) return false;
+
+  const candidate = item as Record<string, unknown>;
+
+  return (
+    typeof candidate.url === "string" &&
+    candidate.url.length > 0 &&
+    (candidate.thumb === undefined || typeof candidate.thumb === "string") &&
+    (candidate.type === undefined || typeof candidate.type === "string")
+  );
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { url } = await request.json();
@@ -54,18 +71,12 @@ export async function POST(request: NextRequest) {
 
     // Handle multiple items (picker - Instagram carousels, etc.)
     if (data.status === "picker") {
-      const pickerItems = Array.isArray(data.picker)
-        ? (data.picker as Array<{ url?: string; thumb?: string; type?: string }>)
-        : [];
+      const pickerItems: unknown[] = Array.isArray(data.picker) ? data.picker : [];
 
       return NextResponse.json({
         success: true,
         multiple: true,
-        items: pickerItems
-          .filter(
-            (item): item is { url: string; thumb?: string; type?: string } =>
-              typeof item.url === "string" && item.url.length > 0
-          )
+        items: pickerItems.filter(isPickerItem)
           .map((item) => ({
             url: item.url,
             thumb: item.thumb,
