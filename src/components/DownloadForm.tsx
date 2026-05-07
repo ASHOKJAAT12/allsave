@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Loader2, Download as DownloadIcon, Clipboard, AlertCircle, CheckCircle } from "lucide-react";
 import { Platform, DownloadItem } from "@/types";
-
+import Image from "next/image";
 interface DownloadFormProps {
   platform: Platform;
 }
@@ -163,10 +163,12 @@ export default function DownloadForm({ platform }: DownloadFormProps) {
                 className="relative rounded-lg overflow-hidden hover:opacity-90 transition-opacity"
               >
                 {item.thumb && (
-                  <img
+                  <Image
                     src={item.thumb}
                     alt={`Item ${index + 1}`}
                     className="w-full h-32 object-cover"
+                    width={100}
+                    height={100}
                   />
                 )}
                 <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
