@@ -38,10 +38,7 @@ function resolveConfiguredYtDlpBinary(): string | null {
 
 function getYtDlpCandidates(): YtDlpCommand[] {
   const configuredBinary = resolveConfiguredYtDlpBinary();
-  const bundledBinaries = [
-    join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", "yt-dlp"),
-    "/var/task/node_modules/yt-dlp-exec/bin/yt-dlp",
-  ];
+  const bundledBinaries = [join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", "yt-dlp")];
   const candidates: YtDlpCommand[] = [
     ...bundledBinaries.map((binary) => ({ binary, prefixArgs: [] })),
     { binary: "yt-dlp", prefixArgs: [] },
