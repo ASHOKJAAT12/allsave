@@ -40,9 +40,10 @@ function resolveConfiguredYtDlpBinary(): string | null {
 
 function resolveBundledYtDlpBinary(): string | null {
   try {
-    const packageJsonPath = require.resolve("yt-dlp-exec/package.json");
-    // The yt-dlp-exec package stores its downloaded binary in ./bin/yt-dlp relative to package.json.
-    return join(dirname(packageJsonPath), "bin", "yt-dlp");
+    const entryPointPath = require.resolve("yt-dlp-exec");
+    const binaryName = process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp";
+    // yt-dlp-exec entrypoint resolves to ./src/index.js; bundled binary lives in ./bin next to ./src.
+    return join(dirname(entryPointPath), "..", "bin", binaryName);
   } catch {
     return null;
   }
