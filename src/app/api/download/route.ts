@@ -38,9 +38,9 @@ function resolveConfiguredYtDlpBinary(): string | null {
 
 function getYtDlpCandidates(): YtDlpCommand[] {
   const configuredBinary = resolveConfiguredYtDlpBinary();
-  const bundledBinaries = [join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", "yt-dlp")];
+  const bundledBinary = join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", "yt-dlp");
   const candidates: YtDlpCommand[] = [
-    ...bundledBinaries.map((binary) => ({ binary, prefixArgs: [] })),
+    { binary: bundledBinary, prefixArgs: [] },
     { binary: "yt-dlp", prefixArgs: [] },
     { binary: "python3", prefixArgs: ["-m", "yt_dlp"] },
     { binary: "python", prefixArgs: ["-m", "yt_dlp"] },
