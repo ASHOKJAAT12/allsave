@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { execFile } from "node:child_process";
-import { isAbsolute, join, normalize } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join, normalize } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 const MAX_PLAYLIST_ITEMS = 10;
 const MAX_BUFFER_SIZE = 1024 * 1024 * 50;
 const YT_DLP_FORMAT = "b[height<=720]/best[height<=720]/b/best";
@@ -36,11 +38,18 @@ function resolveConfiguredYtDlpBinary(): string | null {
   return isSafePath ? configuredBinary : null;
 }
 
+function resolveBundledYtDlpBinary(): string | null {
+  try {
+    const packageJsonPath = require.resolve("yt-dlp-exec/package.json");
+    return join(dirname(packageJsonPath), "bin", "yt-dlp");
+  } catch {
+    return null;
+  }
+}
+
 function getYtDlpCandidates(): YtDlpCommand[] {
   const configuredBinary = resolveConfiguredYtDlpBinary();
-  const bundledBinary = join(process.cwd(), "node_modules", "yt-dlp-exec", "bin", "yt-dlp");
   const candidates: YtDlpCommand[] = [
-    { binary: bundledBinary, prefixArgs: [] },
     { binary: "yt-dlp", prefixArgs: [] },
     { binary: "python3", prefixArgs: ["-m", "yt_dlp"] },
     { binary: "python", prefixArgs: ["-m", "yt_dlp"] },
@@ -49,6 +58,11 @@ function getYtDlpCandidates(): YtDlpCommand[] {
 
   if (configuredBinary) {
     candidates.unshift({ binary: configuredBinary, prefixArgs: [] });
+  }
+
+  const bundledBinary = resolveBundledYtDlpBinary();
+  if (bundledBinary) {
+    candidates.unshift({ binary: bundledBinary, prefixArgs: [] });
   }
 
   const seen = new Set<string>();
