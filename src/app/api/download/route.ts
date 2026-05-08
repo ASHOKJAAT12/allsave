@@ -41,7 +41,7 @@ function resolveConfiguredYtDlpBinary(): string | null {
 function resolveBundledYtDlpBinary(): string | null {
   try {
     const packageJsonPath = require.resolve("yt-dlp-exec/package.json");
-    // yt-dlp-exec exposes package.json publicly and stores the downloaded binary in ./bin/yt-dlp.
+    // The yt-dlp-exec package stores its downloaded binary in ./bin/yt-dlp relative to package.json.
     return join(dirname(packageJsonPath), "bin", "yt-dlp");
   } catch {
     return null;
@@ -57,13 +57,13 @@ function getYtDlpCandidates(): YtDlpCommand[] {
     { binary: "py", prefixArgs: ["-m", "yt_dlp"] },
   ];
 
-  if (configuredBinary) {
-    candidates.unshift({ binary: configuredBinary, prefixArgs: [] });
-  }
-
   const bundledBinary = resolveBundledYtDlpBinary();
   if (bundledBinary) {
     candidates.unshift({ binary: bundledBinary, prefixArgs: [] });
+  }
+
+  if (configuredBinary) {
+    candidates.unshift({ binary: configuredBinary, prefixArgs: [] });
   }
 
   const seen = new Set<string>();
