@@ -41,6 +41,7 @@ function resolveConfiguredYtDlpBinary(): string | null {
 function resolveBundledYtDlpBinary(): string | null {
   try {
     const packageJsonPath = require.resolve("yt-dlp-exec/package.json");
+    // yt-dlp-exec exposes package.json publicly and stores the downloaded binary in ./bin/yt-dlp.
     return join(dirname(packageJsonPath), "bin", "yt-dlp");
   } catch {
     return null;
